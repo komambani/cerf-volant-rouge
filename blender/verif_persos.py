@@ -54,7 +54,13 @@ print("\n" + "=" * 72)
 print("VERIFICATION DES PERSONNAGES")
 print("=" * 72)
 
-for nom in ("Awa", "Tano"):
+
+def _verifier():
+    for nom in ("Awa", "Tano"):
+        _un_personnage(nom)
+
+
+def _un_personnage(nom):
     f = C.FICHES[nom]
     print("\n--- %s ---" % nom)
     pieces = [o for o in bpy.data.objects
@@ -138,7 +144,108 @@ for nom in ("Awa", "Tano"):
           "ecart min %.1f mm sur la zone commune (seuil %.0f)"
           % (mini if mini is not None else -1, SEUIL))
 
-    # 5. Yeux complets : sclere + iris + pupille + reflets (defaut v1)
+    # 4c. L'ourlet ne doit pas BALLONNER : un t-shirt tombe le long du corps.
+    # Defaut v10 : pour eviter les cuisses, l'ourlet avait ete elargi a leur
+    # diametre et formait un bourrelet. Le tissu ne depasse pas 35 % du rayon
+    # du tronc nu a la meme hauteur.
+    corps_pts = pts_monde(corps)
+    z_ourlet_mes = min(p.z for p in ph)
+    r_tissu = rayon_tranche(ph, cx, z_ourlet_mes + 0.012)
+    r_peau = rayon_tranche(corps_pts, cx, z_ourlet_mes + 0.012)
+    if r_tissu and r_peau:
+        bouffant = r_tissu / r_peau
+        check("%s : ourlet pres du corps" % nom, bouffant < 1.35,
+              "tissu %.1f %% du tronc nu" % (bouffant * 100))
+    # 4d. Les bras doivent etre DEGAGES du buste : en v11 ils pendaient colles
+    # au torse, les mains touchaient les cuisses, la silhouette fusionnait.
+    S = C.squelette(f)
+    R = C.rayons(f, S)
+    bras_x = abs(S["poignet"](1).x)
+    buste_x = R["poitrine"] * 1.16
+    check("%s : bras degages du buste" % nom, bras_x > buste_x * 1.08,
+          "poignet a %.0f %% du demi-buste" % (bras_x / buste_x * 100))
+
+    # 4e. Le sac ne doit pas occuper la place du bras (defaut v11 : la main de
+    # Tano traversait le sac porte a la hanche).
+    sac = bpy.data.objects.get("%s_SAC" % nom)
+    mains = [o for o in pieces if "_MAIN" in o.name]
+    if sac and mains:
+        def centre_xy(o):
+            b = englobant(o)
+            return Vector(((b[0] + b[1]) / 2, (b[2] + b[3]) / 2))
+        cs = centre_xy(sac)
+        dmin = min((cs - centre_xy(m)).length for m in mains)
+        check("%s : sac degage des mains" % nom, dmin > 0.055,
+              "%.0f mm de la main la plus proche" % (dmin * 1000))
+
+    # 4f. LE BRAS DOIT AVOIR DU VOLUME. Controle le plus important du lot : en
+    # v12 le verificateur a affiche 43/43 alors que les deux personnages
+    # n'avaient PLUS DE BRAS (reduits a un fil noir). Aucun controle ne
+    # mesurait la chair des membres ; compter les maillages ne suffit pas,
+    # l'objet CORPS existait toujours. On mesure donc le rayon perpendiculaire
+    # a l'axe coude-poignet, qui doit rester proche du rayon theorique.
+    corps_pts = pts_monde(corps)
+    arm_ob = bpy.data.objects["%s_RIG" % nom]
+    k = arm_ob.scale.x
+    off = arm_ob.location
+
+    def en_monde(p):
+        return Vector((p.x * k + off.x, p.y * k + off.y, p.z * k + off.z))
+
+    for s, cote in ((-1, "gauche"), (1, "droit")):
+        co = en_monde(S["coude"](s))
+        po = en_monde(S["poignet"](s))
+        axe = (po - co).normalized()
+        rayons_mes = []
+        for u in (0.30, 0.50, 0.70):
+            centre = co + (po - co) * u
+            proches = []
+            for q in corps_pts:
+                v = q - centre
+                t = v.dot(axe)
+                if abs(t) < 0.010:
+                    d = (v - axe * t).length
+                    if d < 0.075:          # au-dela : torse ou jambe
+                        proches.append(d)
+            if proches:
+                rayons_mes.append(sum(proches) / len(proches))
+        r_theo = R["avbras"] * k
+        if rayons_mes:
+            r_moy = sum(rayons_mes) / len(rayons_mes)
+            check("%s : avant-bras %s a du volume" % (nom, cote),
+                  r_moy > r_theo * 0.45,
+                  "rayon %.1f mm (theorique %.1f)" % (r_moy * 1000,
+                                                     r_theo * 1000))
+        else:
+            check("%s : avant-bras %s a du volume" % (nom, cote), False,
+                  "AUCUN sommet autour de l'axe : le bras n'existe pas")
+
+    # 4g. Meme controle pour les JAMBES : meme structure de chaine, donc meme
+    # risque de degenerescence du Skin.
+    for s, cote in ((-1, "gauche"), (1, "droit")):
+        g = en_monde(S["genou"](s))
+        cv = en_monde(S["cheville"](s))
+        axe = (cv - g).normalized()
+        rs = []
+        for u in (0.30, 0.55):
+            centre = g + (cv - g) * u
+            proches = []
+            for q in corps_pts:
+                v = q - centre
+                t = v.dot(axe)
+                if abs(t) < 0.010:
+                    d = (v - axe * t).length
+                    if d < 0.090:
+                        proches.append(d)
+            if proches:
+                rs.append(sum(proches) / len(proches))
+        r_theo = R["mollet"] * k
+        check("%s : mollet %s a du volume" % (nom, cote),
+              bool(rs) and (sum(rs) / len(rs)) > r_theo * 0.45,
+              ("rayon %.1f mm (theorique %.1f)"
+               % ((sum(rs) / len(rs)) * 1000, r_theo * 1000)) if rs
+              else "AUCUN sommet autour de l'axe")
+
     for part in ("SCLERE", "IRIS", "PUPILLE", "REFL_A"):
         n = len([o for o in pieces if part in o.name])
         check("%s : %s x2" % (nom, part.lower()), n == 2, "%d trouve(s)" % n)
@@ -169,7 +276,6 @@ for nom in ("Awa", "Tano"):
               "longueur %.1f cm" % (longueur * 100))
 
     # 10. Cou court : defaut v1 (cou de girafe)
-    S = C.squelette(f)
     lcou = (S["tete_bas"] - S["cou"]).length
     check("%s : cou court" % nom, lcou < 0.055 * f["taille"],
           "%.1f mm" % (lcou * 1000))
@@ -189,6 +295,20 @@ for nom in ("Awa", "Tano"):
     check("%s : 4 chaines IK" % nom, iks == 4, "%d IK" % iks)
 
 # Difference de taille : point narratif (Tano echoue en P004, Awa reussit P008)
+# Le corps du verificateur est enveloppe : une exception Python (nom non defini,
+# objet absent) doit se lire comme un ECHEC franc, pas disparaitre dans le log
+# en laissant la sortie ressembler a un succes partiel (defaut v12 : un
+# NameError interrompait la boucle, le dernier controle affiche restait [OK]).
+try:
+    _verifier()
+except Exception as exc:
+    import traceback
+    traceback.print_exc()
+    print("\n" + "=" * 72)
+    print("ECHEC : le verificateur lui-meme a plante -> %s" % exc)
+    print("=" * 72)
+    sys.exit(2)
+
 ha = C.FICHES["Awa"]["taille"]
 ht_ = C.FICHES["Tano"]["taille"]
 print("\n--- narration ---")

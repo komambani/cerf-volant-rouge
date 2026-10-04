@@ -124,6 +124,10 @@ def squelette(f):
     lx_ha = 0.070 * T * c
     z_coude = z_epaule - 0.115 * T
     z_poignet = z_epaule - 0.225 * T
+    # Pose de repos : les bras s'ECARTENT en descendant (coude 1.20, poignet
+    # 1.32 de la demi-carrure). Colles au buste ils fusionnaient visuellement
+    # avec le torse et les mains touchaient les cuisses (defaut v11).
+    ECART_C, ECART_P = 1.26, 1.46
 
     return dict(
         hd=hd, T=T,
@@ -133,10 +137,14 @@ def squelette(f):
         cou=Vector((0, 0, z_cou)),
         tete_bas=Vector((0, 0, z_menton)),
         tete_centre=Vector((0, -0.004 * T, z_menton + 0.46 * hd)),
+        # Haut du torse, au niveau des epaules mais sur l'axe : sans ce point
+        # le vetement sautait de la poitrine au cou et le Skin tendait un plan
+        # incline jusqu'aux epaules -> silhouette en cintre (defaut v11).
+        haut_torse=Vector((0, 0, z_epaule)),
         epaule=lambda s: Vector((s * lx_ep, 0, z_epaule)),
-        coude=lambda s: Vector((s * lx_ep * 1.20, 0.008 * T, z_coude)),
-        poignet=lambda s: Vector((s * lx_ep * 1.32, 0.018 * T, z_poignet)),
-        main=lambda s: Vector((s * lx_ep * 1.36, 0.022 * T, z_poignet - 0.052 * T)),
+        coude=lambda s: Vector((s * lx_ep * ECART_C, 0.008 * T, z_coude)),
+        poignet=lambda s: Vector((s * lx_ep * ECART_P, 0.018 * T, z_poignet)),
+        main=lambda s: Vector((s * lx_ep * (ECART_P + 0.06), 0.022 * T, z_poignet - 0.052 * T)),
         hanche=lambda s: Vector((s * lx_ha, 0, z_hanche)),
         genou=lambda s: Vector((s * lx_ha * 0.94, -0.006 * T, z_genou)),
         cheville=lambda s: Vector((s * lx_ha * 0.90, 0, z_cheville)),
@@ -169,6 +177,18 @@ def mesh_chaines(nom, chaines, mat):
                 idx[k] = v
             v[sk].radius = (r, r)
             if prev is not None and prev != v and not bm.edges.get((prev, v)):
+                # Garde-fou : un rayon Skin superieur a la longueur de l'arete
+                # fait exploser le modificateur, qui produit une boule avalant
+                # le membre (defaut v12/v13 : avant-bras reduits a 0,6 mm de
+                # chair). Mieux vaut un avertissement ici qu'un bras disparu.
+                lg = (prev.co - v.co).length
+                rmax = max(prev[sk].radius[0], r)
+                if rmax > lg * 0.95:
+                    print("  !! %s : rayon %.1f mm > arete %.1f mm entre "
+                          "(%.3f,%.3f,%.3f) et (%.3f,%.3f,%.3f)"
+                          % (nom, rmax * 1000, lg * 1000,
+                             prev.co.x, prev.co.y, prev.co.z,
+                             v.co.x, v.co.y, v.co.z))
                 bm.edges.new((prev, v))
             prev = v
     bm.verts.index_update()
@@ -244,14 +264,22 @@ def corps(nom, f, S):
     peau = mat_cel("PEAU_%s" % nom, f["peau"])
     R = rayons(f, S)
 
+    # haut_torse fait partie de la chaine du TRONC : c'est ce qui le rend
+    # soudable. Les bras s'y rattachent ensuite et ne forment plus une ile.
     ch = [[
         (S["bassin"], R["bassin"]), (S["taille"], R["taille"]),
-        (S["poitrine"], R["poitrine"]), (S["cou"], R["cou"]),
-        (S["tete_bas"], R["cou"] * 1.02),
+        (S["poitrine"], R["poitrine"]), (S["haut_torse"], R["poitrine"] * 0.92),
+        (S["cou"], R["cou"]), (S["tete_bas"], R["cou"] * 1.02),
     ]]
     for s in (-1, 1):
+        # Le bras part du vertex PARTAGE haut_torse : les chaines se soudent par
+        # coordonnees identiques (voir mesh_chaines). En v12/v13 le depart etait
+        # un point decale, donc un sommet a UNE SEULE arete -> le bras devenait
+        # une ile flottante, et son rayon de racine (100 mm) depassait la
+        # longueur de l'arete (80 mm) : le Skin produisait une boule qui avalait
+        # le membre. Mesure : 0,6 mm de chair sur un avant-bras de 35 mm.
         ch.append([
-            (S["poitrine"], R["poitrine"]), (S["epaule"](s), R["epaule"]),
+            (S["haut_torse"], R["poitrine"] * 0.92), (S["epaule"](s), R["epaule"]),
             (S["coude"](s), R["bras"]), (S["poignet"](s), R["avbras"]),
         ])
         ch.append([
@@ -420,44 +448,42 @@ def vetements(nom, f, S):
     MARGE = 1.16
 
     # --- Haut : torse + manches courtes qui suivent le bras ---
-    # Le t-shirt recouvre la ceinture du pantalon sur TOUTE la zone commune, a
-    # rayon constant. Mesure v7 : en laissant l'ourlet se retrecir vers le haut
-    # pendant que la ceinture s'elargissait, le sens de recouvrement s'inversait
-    # en cours de jonction (+34 mm puis -46 mm) et les surfaces se croisaient.
-    # Ici l'ourlet reste large jusqu'au-dessus de la ceinture : un seul sens.
-    #
-    # Le rayon de l'ourlet est derive de la piece la plus large qu'il doit
-    # couvrir : non pas la ceinture, mais les CUISSES du bas, qui s'ecartent
-    # lateralement a la hanche. Mesure v9 : chez Tano l'ourlet (0,1702) et la
-    # cuisse (0,1703) se touchaient a 0,1 mm, alors que la ceinture, elle,
-    # avait bien ses 12 mm de jeu. Le point de contact n'etait pas celui que
-    # je corrigeais.
+    # L'ourlet s'arrete AU-DESSUS des cuisses, a mi-chemin bassin-taille, et
+    # garde le rayon du tronc : un t-shirt tombe le long du corps, il n'enveloppe
+    # pas les hanches. En v10, pour eviter le contact avec les cuisses, l'ourlet
+    # avait ete elargi a leur diametre -> il ballonnait en bourrelet.
+    # Ici c'est la HAUTEUR qui evite les cuisses, pas la largeur.
     JEU = 0.012             # 12 mm de jeu franc, en absolu (pas en %)
-    demi_ecart_hanches = abs(S["hanche"](1).x)
-    r_bas_max = demi_ecart_hanches + R["cuisse"] * MARGE
-    r_ourlet = r_bas_max + JEU
-    z_haut_ceinture = S["bassin"] + (S["taille"] - S["bassin"]) * 0.55
+    z_ourlet = S["bassin"] + (S["taille"] - S["bassin"]) * 0.42
+    r_ourlet = R["bassin"] * MARGE * 1.04
     ch = [[
-        (S["bassin"] - Vector((0, 0, 0.030 * T)), r_ourlet),
-        (z_haut_ceinture + Vector((0, 0, 0.020 * T)), r_ourlet),
+        (z_ourlet, r_ourlet),
+        (z_ourlet + Vector((0, 0, 0.030 * T)), r_ourlet),
         (S["taille"], R["taille"] * MARGE),
         (S["poitrine"], R["poitrine"] * MARGE),
-        (S["cou"] - Vector((0, 0, 0.020 * T)), R["cou"] * 1.35),
+        (S["haut_torse"], R["poitrine"] * MARGE * 0.94),
+        (S["cou"] - Vector((0, 0, 0.012 * T)), R["cou"] * 1.12),
     ]]
     for s in (-1, 1):
         e, co = S["epaule"](s), S["coude"](s)
-        # La manche s'arrete a mi-bras et suit le bras : pas de poncho.
+        # La manche part du HAUT DU TORSE, pas de la poitrine : en v11 le
+        # vetement sautait directement du thorax a l'epaule et le Skin tendait
+        # un plan incline entre les deux -> ligne d'epaule droite, en cintre.
+        # Le point intermediaire arrondit le deltoide.
         ch.append([
-            (S["poitrine"], R["poitrine"] * MARGE),
-            (e, R["epaule"] * MARGE),
+            (S["haut_torse"], R["poitrine"] * MARGE * 0.94),
+            (S["haut_torse"] + (e - S["haut_torse"]) * 0.55,
+             R["epaule"] * MARGE * 1.06),
+            (e, R["epaule"] * MARGE * 0.98),
             (e + (co - e) * 0.50, R["bras"] * MARGE * 1.12),
         ])
     P.append(mesh_chaines("%s_HAUT" % nom, ch, haut))
 
-    # --- Bas : reste SOUS le t-shirt sur toute la zone commune. Son rayon est
-    # fixe par celui de l'ourlet moins le jeu, defini plus haut.
+    # --- Bas : sa ceinture monte au-dessus de l'ourlet du t-shirt et reste
+    # plus etroite que lui, de sorte que l'ourlet la recouvre sans la toucher.
     r_ceinture = r_ourlet - JEU
-    ch = [[(z_haut_ceinture, r_ceinture),
+    z_ceinture = z_ourlet + Vector((0, 0, 0.045 * T))
+    ch = [[(z_ceinture, r_ceinture),
            (S["bassin"], r_ceinture)]]
     for s in (-1, 1):
         h, g, cv = S["hanche"](s), S["genou"](s), S["cheville"](s)
@@ -486,14 +512,18 @@ def vetements(nom, f, S):
         P.append(sphere("%s_BRACELET" % nom, R["avbras"] * 1.45,
                         S["poignet"](-1), br, scale=(1.0, 1.0, 0.26)))
     if f.get("sac"):
+        # Le sac est porte DANS LE DOS (+Y), pas sur la hanche : a la hanche il
+        # occupait la place du bras et la main le traversait (defaut v11).
         sm = mat_cel("SAC_%s" % nom, f["sac"])
-        p = Vector((R["bassin"] * 1.15, 0.030 * T, S["z_hanche"] + 0.030 * T))
+        p = Vector((R["bassin"] * 0.42, 0.105 * T, S["z_hanche"] + 0.095 * T))
         P.append(sphere("%s_SAC" % nom, 0.058 * T, p, sm,
-                        scale=(0.70, 0.44, 0.84)))
+                        scale=(0.78, 0.40, 0.92)))
         P.append(mesh_chaines("%s_SANGLE" % nom, [[
-            (Vector((-0.040 * T, 0.015 * T, S["z_epaule"] + 0.010 * T)),
+            (Vector((-0.045 * T, -0.010 * T, S["z_epaule"] + 0.008 * T)),
              0.008 * T),
-            (p + Vector((0, 0, 0.040 * T)), 0.008 * T),
+            (Vector((0.010 * T, 0.045 * T, S["z_epaule"] - 0.030 * T)),
+             0.008 * T),
+            (p + Vector((0, -0.010 * T, 0.045 * T)), 0.008 * T),
         ]], sm))
     return P
 
