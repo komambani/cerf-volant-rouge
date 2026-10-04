@@ -155,6 +155,9 @@ def squelette(f):
 
 
 ALERTES = []            # pieges Skin detectes a la construction (voir plus bas)
+REPESEES = []           # pieces rigides repesees sur leur os d'appartenance
+REORDONNES = []         # objets dont le contour a ete remis apres l'armature
+MEMBRES_REPESES = []    # maillages dont les membres ont ete reponses par axe
 
 
 def mesh_chaines(nom, chaines, mat):
@@ -180,22 +183,33 @@ def mesh_chaines(nom, chaines, mat):
                 idx[k] = v
             v[sk].radius = (r, r)
             if prev is not None and prev != v and not bm.edges.get((prev, v)):
-                # Garde-fou : un rayon Skin superieur a la longueur de l'arete
-                # fait exploser le modificateur, qui produit une boule avalant
-                # le membre (defaut v12/v13 : avant-bras reduits a 0,6 mm de
-                # chair). Mieux vaut un avertissement ici qu'un bras disparu.
-                lg = (prev.co - v.co).length
-                rmax = max(prev[sk].radius[0], r)
-                if rmax > lg * 0.95:
-                    ALERTES.append(
-                        "%s : rayon %.1f mm > arete %.1f mm entre "
-                        "(%.3f,%.3f,%.3f) et (%.3f,%.3f,%.3f)"
-                        % (nom, rmax * 1000, lg * 1000,
-                           prev.co.x, prev.co.y, prev.co.z,
-                           v.co.x, v.co.y, v.co.z))
                 bm.edges.new((prev, v))
             prev = v
     bm.verts.index_update()
+    # Diagnostic Skin, pose APRES construction de toutes les aretes.
+    #
+    # Honnetete sur sa valeur predictive : ce signal est INDICATIF, pas un
+    # verdict. Mesure v16 : l'ourlet du t-shirt sort a 133,7 mm de rayon sur
+    # une arete de 44,4 mm et se rend parfaitement -- c'est un disque large en
+    # bout de chaine, cas normal. Le cas vraiment destructeur (bras perdus en
+    # v12-v13) cumulait deux conditions : extremite a rayon surdimensionne ET
+    # membre ETROIT en aval. Seule la mesure de volume des membres
+    # (verif_persos.py, controles 4f et 4g) tranche pour de bon.
+    for v in bm.verts:
+        if len(v.link_edges) != 1:
+            continue
+        e = v.link_edges[0]
+        autre = e.other_vert(v)
+        lg = (autre.co - v.co).length
+        r = v[sk].radius[0]
+        # Seuil resserre : on ne signale que les extremites FINES, celles qui
+        # appartiennent a un membre. Une extremite large (ourlet, ceinture) est
+        # un bout de volume, pas un membre a avaler.
+        if r > lg * 0.95 and r < 0.060:
+            ALERTES.append(
+                "%s : extremite fine a (%.3f,%.3f,%.3f) rayon %.1f mm > arete "
+                "%.1f mm -- a verifier par la mesure de volume"
+                % (nom, v.co.x, v.co.y, v.co.z, r * 1000, lg * 1000))
     bm.to_mesh(me)
     bm.free()
 
@@ -572,6 +586,17 @@ def armature(nom, f, S):
             S["cheville"](s) + Vector((0, -0.10, 0)), "racine")
 
     bpy.ops.object.mode_set(mode="POSE")
+
+    # Un os de CIBLE IK ne doit jamais deformer le maillage. Il reste a sa
+    # place pendant que le membre bouge : tout sommet pese sur lui est tire
+    # entre deux ancrages. Mesure (v8) : les mains d'Awa s'etiraient sur
+    # 64 cm de haut et celles de Tano sur 89 cm -- c'etaient elles, les
+    # "plaques noires" que j'ai d'abord prises pour les nattes puis pour un
+    # depassement d'articulation.
+    for b in a.data.bones:
+        if b.name.startswith("ik_"):
+            b.use_deform = False
+
     for k in ("G", "D"):
         for b, t in (("avbras_%s" % k, "ik_main_%s" % k),
                      ("tibia_%s" % k, "ik_pied_%s" % k)):
@@ -628,6 +653,229 @@ def construire_personnage(nom, position=(0, 0, 0)):
     arm.select_set(True)
     bpy.context.view_layer.objects.active = arm
     bpy.ops.object.parent_set(type="ARMATURE_AUTO")
+
+    # ARMATURE_AUTO pese par PROXIMITE geometrique, pas par appartenance.
+    # Mesure (v8) : les nattes d'Awa, qui descendent dans le dos jusqu'au bas
+    # des reins, se retrouvaient pesees sur cuisse_D/cuisse_G (poids 4,0) et
+    # epaule_D/epaule_G (3,0) -- aucun poids sur `tete`. Des qu'elle levait ou
+    # tendait les bras, ses nattes partaient avec et s'etiraient en longues
+    # plaques noires en travers du torse.
+    #
+    # Une piece rigide solidaire d'une partie du corps doit etre pesee sur
+    # l'os de cette partie, pas sur l'os le plus proche. On corrige donc
+    # explicitement apres coup.
+    RATTACHEMENT = (
+        ("NATTE", "tete"), ("PERLE", "tete"), ("CHEV", "tete"),
+        ("FRANGE", "tete"), ("BOUCLE", "tete"),
+        ("SAC", "colonne"), ("SANGLE", "colonne"),
+        # Toute la face suit la tete. Mesure (v32) : le nez gardait 80 de
+        # poids sur `cou` et le Skin l'etirait de 43 a 188 mm des que le cou
+        # pivotait. Une piece rigide sur une articulation est une bombe a
+        # retardement.
+        ("NEZ", "tete"), ("OEIL", "tete"), ("IRIS", "tete"),
+        ("PUPILLE", "tete"), ("SCLERE", "tete"), ("REFL", "tete"),
+        ("PAUPIERE", "tete"), ("BOUCHE", "tete"), ("OREILLE", "tete"),
+    )
+    # Pieces rigides de membre : le bracelet suit le main, cote oppose au
+    # bras de pose (mesure v33 : main_G=184,7 / avbras_G=129,3 au repos, et
+    # la Skin l'etirait de 9,8 a 19,3 mm des que le poignet bougeait). Il est
+    # pose APRES la repesee par axe des membres, sinon celle-ci lui remet un
+    # poids partage avec l'avant-bras.
+    RATTACHEMENT_MEMBRES = (("BRACELET", "main_G"),)
+    for o in P:
+        cible = None
+        for motif, os_nom in RATTACHEMENT:
+            if motif in o.name.upper():
+                cible = os_nom
+                break
+        if cible is None or cible not in arm.data.bones:
+            continue
+        for vg in list(o.vertex_groups):
+            o.vertex_groups.remove(vg)
+        vg = o.vertex_groups.new(name=cible)
+        vg.add(range(len(o.data.vertices)), 1.0, "REPLACE")
+        REPESEES.append("%s -> %s" % (o.name, cible))
+
+    # Repeser les membres par PROJECTION sur l'axe de l'os.
+    #
+    # ARMATURE_AUTO attribue chaque sommet a l'os le plus PROCHE, ce qui est
+    # faux pour un membre : un sommet du torse proche de l'epaule prend
+    # `bras_*` et part avec le bras. Mesure (v31) sur Tano au repos :
+    # 72 sommets de Tano_CORPS et de Tano_HAUT etaient peses sur `bras_D` avec
+    # une altitude de 0,96 a 1,11 m, alors que l'os `bras_D` va de 0,75 a
+    # 0,90 m -- ils etaient 20 cm trop haut. Le buste entier suivait le bras,
+    # ce qui donnaient des membres segmentes, disjoints, des mains spheres
+    # detachees et une chair deformee de 39 % (cotes d'aretes). L'image
+    #montrait des bras en "<bats jointes", pas un probleme de pose.
+    #
+    # On repart de zero et on attribue chaque sommet a l'os de membre dont il
+    # est le plus proche SUR LA CHAINE, avec une transition douce aux
+    # articulations : deux os voisins se partagent le sommet au prorata des
+    # distances, comme le fait n'importequelle ponderation correcte.
+    MEMBRES = ("epaule_", "bras_", "avbras_", "main_", "cuisse_", "tibia_",
+               "pied_")
+    for o in P:
+        if o.type != "MESH":
+            continue
+        noms_obj = o.name.upper()
+        # Les pieces rigides de tete et de dos ont deja ete pesees ci-dessus.
+        if any(m in noms_obj for m in ("NATTE", "PERLE", "CHEV", "FRANGE",
+                                      "BOUCLE", "SAC", "SANGLE", "TETE")):
+            continue
+        # Toute piece de la face suit la TETE, jamais le cou. Mesure (v32) :
+        # apres la repesee par axe ci-dessous, le nez gardait 80 de poids sur
+        # `cou` et 230 sur `tete` ; le Skin l'etire alors de 43 a 188 mm
+        # (+4,3) des que le cou pivote -- piece rigide sur une articulation.
+        if any(m in noms_obj for m in ("NEZ", "OEIL", "IRIS", "PUPILLE",
+                                       "SCLERE", "REFL", "PAUPIERE",
+                                       "BOUCHE", "OREILLE", "BRACELET")):
+            continue
+        # Chaine des os du membre, dans l'ordre
+        chaine = []
+        for cote in ("_D", "_G"):
+            for tronc in ("epaule", "bras", "avbras", "main", "cuisse",
+                          "tibia", "pied"):
+                nom_os = tronc + cote
+                if nom_os in arm.data.bones:
+                    chaine.append(nom_os)
+        segments = []
+        for nom_os in chaine:
+            pb = arm.pose.bones[nom_os]
+            segments.append((nom_os, pb.head.copy(), pb.tail.copy()))
+        if not segments:
+            continue
+        for vg in list(o.vertex_groups):
+            o.vertex_groups.remove(vg)
+        groupes = dict((nom_os, o.vertex_groups.new(name=nom_os))
+                       for nom_os, _, _ in segments)
+        lg = [groupes[n] for n, _, _ in segments]
+        n_rep = 0
+        for v in o.data.vertices:
+            p = o.matrix_world @ v.co
+            poids = []
+            for nom_os, h, t in segments:
+                # distance du sommet au segment [h, t]
+                ab = t - h
+                L2 = ab.length_squared
+                u = 0.0 if L2 < 1e-12 else max(0.0, min(1.0,
+                      (p - h).dot(ab) / L2))
+                poids.append((p - (h + ab * u)).length)
+            # Les deux os les plus proches partagent le sommet
+            ordre = sorted(range(len(poids)), key=lambda i: poids[i])
+            i1, i2 = ordre[0], ordre[1]
+            d1, d2 = poids[i1], poids[i2]
+            # au-dela de la demi-longueur de l'os, on ne melange plus
+            demi = (segments[i1][2] - segments[i1][1]).length * 0.5
+            if d2 > demi or d2 < 1e-9:
+                lg[i1].add([v.index], 1.0, "REPLACE")
+            else:
+                total = d1 + d2
+                lg[i1].add([v.index], d2 / total, "REPLACE")
+                lg[i2].add([v.index], d1 / total, "REPLACE")
+                n_rep += 1
+        MEMBRES_REPESES.append("%s : %d sommets partages" % (o.name, n_rep))
+
+    # Pieces rigides de membre : accessoires ponctuels poses APRES la repesee par
+    # axe, sinon celle-ci leur remet un poids partage avec l'os voisin.
+    #
+    # Le suffixe porte le cote : `_1` pour la droite, `-1` pour la gauche
+    # (verifie : Awa_MAIN1 pese sur `main_D`, Awa_MAIN-1 sur `main_G`).
+    # Mesure (v36) : le pouce gardait 39 points de poids sur `cuisse_D` --
+    # residu de l'attribution automatique que la repesee par axe n'a pas
+    # nettoye, le pouce n'etant pas sur la chaine des os de membre.
+    def os_cible(nom_obj):
+        n = nom_obj.upper()
+        cote = "_G" if n.endswith("-1") else "_D"
+        for motif in ("POUCE", "MAIN", "ONGL", "PAUME"):
+            if motif in n:
+                return "main" + cote
+        for motif, os_nom in RATTACHEMENT_MEMBRES:
+            if motif in n:
+                return os_nom
+        return None
+
+    for o in P:
+        os_nom = os_cible(o.name)
+        if os_nom is None or os_nom not in arm.data.bones:
+            continue
+        for vg in list(o.vertex_groups):
+            o.vertex_groups.remove(vg)
+        o.vertex_groups.new(name=os_nom).add(
+            range(len(o.data.vertices)), 1.0, "REPLACE")
+        REPESEES.append("%s -> %s (apres axe)" % (o.name, os_nom))
+
+    # CONTROLE : aucune piece rigide ne doit etre posee sur une articulation.
+    #
+    # Le meme defaut a ete decouvert trois fois, sur trois articulations
+    # differentes : les nattes sur les cuisses (v8), le nez sur le cou (v32,
+    # Skin l'etrait de 43 a 188 mm) et le bracelet entre main et avant-bras
+    # (v33, +97 %). Le principe est unique et se verifie une fois pour toutes.
+    #
+    # On ne verifie QUE les pieces rigides -- celles listees dans RATTACHEMENT,
+    # attachees volontairement a un seul os. Une ligature qui suit deux os est
+    # normale et ne doit pas etre signalee ; c'est ce qui a rendu le premier
+    # essai de ce controle inutilisable.
+    ALERTES_PIECES = []
+    for o in P:
+        if o.type != "MESH" or not o.vertex_groups:
+            continue
+        attendu = None
+        # Un objet peut correspondre a plusieurs motifs : on ne retient que
+        # les os CIBLES qui sont reellement presents dans ses groupes, et on
+        # exige qu'il n'en reste qu'un. (v34 : Awa_BRACELET portait encore
+        # avbras_G en plus de main_G ; le controle s'arretait sur le premier
+        # motif trouve et signalait un objet deja repare.)
+        noms_obj = o.name.upper()
+        presents = [os_nom for motif, os_nom in RATTACHEMENT
+                    + RATTACHEMENT_MEMBRES if motif in noms_obj]
+        if not presents:
+            continue
+        groupes_reels = set(g.name for g in o.vertex_groups)
+        attendus = [c for c in presents if c in groupes_reels]
+        if len(attendus) == 1:
+            attendu = attendus[0]
+        elif not attendus and len(groupes_reels) == 1:
+            # aucun motif n'a ete pose (objet oublie dans la table) mais
+            # l'objet ne pese que sur un os : on accepte et on le signale
+            attendu = next(iter(groupes_reels))
+        if attendu is None:
+            continue
+        lg = dict((g.index, g.name) for g in o.vertex_groups)
+        poids = {}
+        for v in o.data.vertices:
+            for g in v.groups:
+                n = lg[g.group]
+                poids[n] = poids.get(n, 0.0) + g.weight
+        presents = sorted(poids)
+        if len(presents) != 1 or presents[0] != attendu:
+            ALERTES_PIECES.append(
+                "%s : attendu %s seul, trouve %s"
+                % (o.name, attendu, ", ".join(presents) or "aucun os"))
+
+    if ALERTES_PIECES:
+        for a in ALERTES_PIECES[:10]:
+            print("   !! %s" % a)
+        print("   %d piece(s) rigide(s) mal attachee(s)" % len(ALERTES_PIECES))
+        sys.exit(3)
+
+    # Ordre des modificateurs : le contour (coque inversee) doit etre calcule
+    # SUR LA POSE, donc APRES l'armature. parent_set() ajoute ARMATURE en fin
+    # de pile, derriere le SOLIDIFY pose a la construction -- le contour etait
+    # donc fige au repos puis deforme avec le maillage. Mesure (v9) : 82
+    # objets dans ce cas ; des qu'un membre pliait fort, la coque inversee
+    # traversait la surface et apparaissait en plaques noires le long du
+    # torse et des bras.
+    for o in P:
+        noms = [m.type for m in o.modifiers]
+        if "SOLIDIFY" not in noms or "ARMATURE" not in noms:
+            continue
+        if noms.index("SOLIDIFY") > noms.index("ARMATURE"):
+            continue
+        sol = [m for m in o.modifiers if m.type == "SOLIDIFY"][0]
+        with bpy.context.temp_override(object=o):
+            bpy.ops.object.modifier_move_to_index(
+                modifier=sol.name, index=len(o.modifiers) - 1)
+        REORDONNES.append(o.name)
 
     # Normalisation : le canon en tetes donne la silhouette, pas la taille
     # exacte (crane et chevelure depassent le dernier point articulaire).
@@ -693,4 +941,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Un plantage ne doit jamais ressembler a un succes : Blender quitte avec
+    # le code 0 meme si le script leve une exception (v31 : un NameError sur
+    # une variable mal orthographiee a laisse BUILD=0 dans la sortie).
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        sys.exit(2)

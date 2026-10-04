@@ -250,6 +250,18 @@ def build_props():
             c.objects.unlink(ob)
         kcol.objects.link(ob)
 
+    # Placement : le cerf-volant est COINCE DANS LA BRANCHE, c'est le sujet du
+    # film. Il etait construit centre sur l'origine, donc au sol, a z=-0,375..
+    # 0,375 (defaut trouve a l'assemblage). La branche porteuse est a
+    # (0,90 / 0,15 / 2,25) : la toile s'y accroche, legerement inclinee et
+    # tournee vers la camera pour etre lisible des le premier plan.
+    for nom in ["OBJ_KITE_TOILE", "OBJ_KITE_BORD"] + \
+               ["KITE_RUBAN_%d" % i for i in range(6)]:
+        ob = bpy.data.objects[nom]
+        ob.location = ob.location + Vector((0.90, 0.15, 2.52))
+        ob.rotation_euler = (math.radians(-18), math.radians(12), 0.0)
+    print("   OBJ_KITE accroche a la branche : centre a z=2,52 m")
+
     # OBJ_REEL : diametre 9 cm, poignee noire, ficelle blanche 1,5 mm
     add_cyl("REEL_CORPS", 0.045, 0.11, (0, 0, 0), m_dev,
             rot=(0, math.radians(90), 0), verts=12)
@@ -262,6 +274,14 @@ def build_props():
         for c in ob.users_collection:
             c.objects.unlink(ob)
         rcol.objects.link(ob)
+
+    # Le devidoir repose AU SOL sous l'arbre (note_objets de P001), pas a
+    # l'origine du monde ou il flotterait a mi-hauteur du tronc. Il est
+    # construit centre sur zero : on le pose a 5,5 cm du sol, soit son rayon.
+    for nom in ("REEL_CORPS", "REEL_POIGNEE"):
+        ob = bpy.data.objects[nom]
+        ob.location = ob.location + Vector((0.45, -0.70, 0.055))
+    print("   OBJ_REEL pose au sol sous l'arbre a (0,45 / -0,70)")
 
     bpy.context.view_layer.active_layer_collection = \
         bpy.context.view_layer.layer_collection
@@ -423,10 +443,22 @@ def build_cameras():
         cam = bpy.data.objects.new("CAM_%s" % p["id"], cam_data)
         bpy.context.collection.objects.link(cam)
 
-        # Cible : le sujet du plan, a hauteur d'yeux, a l'origine du decor.
-        # La camera est placee a 'distance' du sujet, sur -Y (axe 0 degre).
+        # Cible : le sujet du plan. La HAUTEUR de visee depend de l'echelle --
+        # un gros plan vise le visage, un plan large vise le buste. V1 visait
+        # `min(h*0.62, hauteur_cam)` pour toutes les echelles, soit la
+        # POITRINE : en GP 85 mm a 1,05 m, Awa etait cadree du cou au nombril,
+        # visage hors champ (defaut vu sur la planche du film assemble).
         h_sujet = M.hauteur_sujet_m(p)
-        cible = Vector((0.0, 0.0, min(h_sujet * 0.62, p["hauteur_cam"])))
+        ech = p["echelle"]
+        if ech in ("GP", "TGP", "INS"):
+            z_vise = h_sujet * 0.94          # visage
+        elif ech in ("PR", "PT"):
+            z_vise = h_sujet * 0.80          # poitrine / epaules
+        elif ech in ("PA", "PM"):
+            z_vise = h_sujet * 0.66          # taille
+        else:
+            z_vise = h_sujet * 0.55          # plans larges : corps entier
+        cible = Vector((0.0, 0.0, z_vise))
         pos0 = Vector((0.0, -p["distance"], p["hauteur_cam"]))
 
         # Empty cible : la camera y est contrainte, ce qui garantit l'axe 0 deg

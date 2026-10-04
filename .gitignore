@@ -4,6 +4,10 @@ tools/
 *.msi
 
 # --- Sorties de rendu (lourdes, reproductibles) ----------------------------
+# Blender resout le prefixe `//` par rapport au .blend, pas au repertoire
+# courant : `-o //renders/frames/` ecrit donc dans blender/renders/ et non
+# dans renders/. Les deux chemins doivent etre couverts.
+blender/renders/
 renders/**/*.png
 renders/**/*.exr
 renders/**/*.jpg
@@ -19,6 +23,16 @@ audio/*.mp3
 !**/.gitkeep
 
 # --- Blender ---------------------------------------------------------------
+# Les .blend intermediaires sont REPRODUCTIBLES par les scripts :
+#   build_scene.py -> cvr01_scene.blend
+#   characters.py  -> cvr01_persos.blend
+#   poses.py       -> cvr01_anim.blend
+# Seul l'assemblage final est versionne (c'est le livrable qu'on ouvre pour
+# rendre le film). Versionner les trois autres, c'est 10 Mo de binaire
+# illisible en diff a chaque iteration de pose.
+blender/cvr01_scene.blend
+blender/cvr01_persos.blend
+blender/cvr01_anim.blend
 *.blend1
 *.blend2
 blender/**/cache/
