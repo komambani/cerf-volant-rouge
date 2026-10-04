@@ -1,0 +1,37 @@
+# --- Outils telecharges (ne jamais versionner : ~400 Mo) -------------------
+tools/
+*.zip
+*.msi
+
+# --- Sorties de rendu (lourdes, reproductibles) ----------------------------
+renders/**/*.png
+renders/**/*.exr
+renders/**/*.jpg
+renders/**/*.mp4
+renders/**/*.mov
+exports/*.mp4
+exports/*.mov
+exports/*.wav
+audio/*.wav
+audio/*.mp3
+
+# On garde la structure des dossiers vides
+!**/.gitkeep
+
+# --- Blender ---------------------------------------------------------------
+*.blend1
+*.blend2
+blender/**/cache/
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- OS / editeurs ---------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
