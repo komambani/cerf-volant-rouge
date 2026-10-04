@@ -154,6 +154,9 @@ def squelette(f):
     )
 
 
+ALERTES = []            # pieges Skin detectes a la construction (voir plus bas)
+
+
 def mesh_chaines(nom, chaines, mat):
     """Maillage organique : chaines de points + Skin + Subsurf.
     Les points partages entre chaines sont fusionnes (bras soudes au torse)."""
@@ -184,11 +187,12 @@ def mesh_chaines(nom, chaines, mat):
                 lg = (prev.co - v.co).length
                 rmax = max(prev[sk].radius[0], r)
                 if rmax > lg * 0.95:
-                    print("  !! %s : rayon %.1f mm > arete %.1f mm entre "
-                          "(%.3f,%.3f,%.3f) et (%.3f,%.3f,%.3f)"
-                          % (nom, rmax * 1000, lg * 1000,
-                             prev.co.x, prev.co.y, prev.co.z,
-                             v.co.x, v.co.y, v.co.z))
+                    ALERTES.append(
+                        "%s : rayon %.1f mm > arete %.1f mm entre "
+                        "(%.3f,%.3f,%.3f) et (%.3f,%.3f,%.3f)"
+                        % (nom, rmax * 1000, lg * 1000,
+                           prev.co.x, prev.co.y, prev.co.z,
+                           v.co.x, v.co.y, v.co.z))
                 bm.edges.new((prev, v))
             prev = v
     bm.verts.index_update()
@@ -244,8 +248,11 @@ def rayons(f, S):
     les deux chaines avaient des points et des rayons differents).
     """
     T, c = S["T"], f["carrure"]
+    # Rayons du corps. Le cou et le haut du torse sont des aretes COURTES :
+    # leur rayon doit rester inferieur a leur longueur, sinon le Skin explose
+    # (regle apprise en v12-v14, bras perdus puis emmanchure dechiree).
     return dict(
-        cou=0.040 * T,
+        cou=0.030 * T,
         poitrine=0.082 * T * c,
         taille=0.070 * T * c,
         bassin=0.078 * T * c,
@@ -466,16 +473,15 @@ def vetements(nom, f, S):
     ]]
     for s in (-1, 1):
         e, co = S["epaule"](s), S["coude"](s)
-        # La manche part du HAUT DU TORSE, pas de la poitrine : en v11 le
-        # vetement sautait directement du thorax a l'epaule et le Skin tendait
-        # un plan incline entre les deux -> ligne d'epaule droite, en cintre.
-        # Le point intermediaire arrondit le deltoide.
+        # La manche part de haut_torse (vertex partage avec le tronc) et va
+        # DIRECTEMENT a l'epaule. Le point intermediaire a 55 % cree par la v11
+        # donnait une arete de 14,8 mm portant un rayon de 127 mm : le Skin
+        # explosait en eclats de tissu sur le deltoide (emmanchure dechiree).
+        # Regle generale : jamais de rayon superieur a la longueur de l'arete.
         ch.append([
             (S["haut_torse"], R["poitrine"] * MARGE * 0.94),
-            (S["haut_torse"] + (e - S["haut_torse"]) * 0.55,
-             R["epaule"] * MARGE * 1.06),
-            (e, R["epaule"] * MARGE * 0.98),
-            (e + (co - e) * 0.50, R["bras"] * MARGE * 1.12),
+            (e, R["epaule"] * MARGE),
+            (e + (co - e) * 0.52, R["bras"] * MARGE * 1.10),
         ])
     P.append(mesh_chaines("%s_HAUT" % nom, ch, haut))
 
@@ -673,6 +679,16 @@ def main():
         out = argv[argv.index("--out") + 1]
     bpy.ops.wm.save_as_mainfile(filepath=os.path.abspath(out))
     print("-" * 70)
+    # Bilan des pieges Skin : un rayon superieur a la longueur de son arete
+    # produit une boule qui avale le membre. Ce diagnostic a coute trois
+    # versions (bras disparus en v12-v13, emmanchure dechiree en v14) ; il est
+    # desormais affiche A LA CONSTRUCTION, avant tout rendu.
+    if ALERTES:
+        print("ALERTES SKIN : %d arete(s) a rayon surdimensionne" % len(ALERTES))
+        for a in ALERTES:
+            print("  !! %s" % a)
+    else:
+        print("alertes skin : aucune")
     print("enregistre : %s" % os.path.abspath(out))
 
 
