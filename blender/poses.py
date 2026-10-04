@@ -81,16 +81,29 @@ LIMITES = {
 
 POSES = {
     # --- regarder vers le haut (le cerf-volant est dans l'arbre) ---
+    # Lever les yeux vers le cerf-volant. Mesures (v44) : les rotations de
+    # cou, tete, colonne et poitrine S'ADDITIONNENT -- chaque os fait pivoter
+    # tout ce qui est au-dessus de lui. Balayage de la saillie du nez devant
+    # le menton en fonction de la SOMME des angles :
+    #     somme  0 deg -> 109 mm      somme 33 deg ->  36 mm
+    #     somme 14 deg ->  82 mm      somme 44 deg ->   6 mm
+    #     somme 25 deg ->  56 mm      somme 62 deg ->  -43 mm (nez derriere)
+    # Baisser le cou en augmentant la colonne ne change donc rien : c'est la
+    # somme qui compte. On vise 25 deg cumules, qui laissent 56 mm de saillie
+    # -- la moitie du repos, assez pour que la camera lise la figure, et le
+    # nez monte quand meme de 124 mm, ce qui donne le regard leve.
     "regarde_haut": {
-        "cou": (-22, 0, 0),
-        "tete": (-16, 0, 0),
-        "colonne": (-6, 0, 0),
+        "cou": (-7, 0, 0),
+        "tete": (-5, 0, 0),
+        "colonne": (-5, 0, 0),
     },
+    # Version appuyee : 33 deg cumules, 36 mm de saillie. Au-dela de 44 la
+    # figure disparait, on reste donc en deca.
     "regarde_haut_fort": {
-        "cou": (-30, 0, 0),
-        "tete": (-22, 0, 0),
-        "colonne": (-10, 0, 0),
-        "poitrine": (-6, 0, 0),
+        "cou": (-10, 0, 0),
+        "tete": (-7, 0, 0),
+        "colonne": (-8, 0, 0),
+        "poitrine": (-5, 0, 0),
     },
     # --- tendre le bras vers la ficelle (vers l'avant-haut) ---
     # epaule_* POSITIF leve la clavicule (mesure : +30 -> main 120 mm plus
@@ -107,14 +120,21 @@ POSES = {
     # Le bras s'eleve vers la ficelle en restant pres de l'axe du corps :
     # a 80 deg d'ecartement il partait a l'horizontale et la tete d'Awa
     # disparaissait derriere l'epaule. 26 deg suffisent a degager la figure.
+    # Effort maximal vers le haut. Mesures (v42) : cou -26 + tete -18 = 44 deg
+    # de bascule arriere cumulee ; a l'image P008, le nez d'Awa passait
+    # DERRIERE son menton (y = -0,37 contre -0,41) -- elle regardait le ciel,
+    # dos a la camera, et on ne voyait que le dessous de son menton. Un
+    # acrobate qui tend le bras regarde sa MAIN, pas le zenith : la main est
+    # a 45 deg au-dessus de l'horizon, pas a 90. On garde donc une bascule
+    # legere (cou -14, tete -8) et on tourne la tete vers la main par Z.
     "tend_bras_d_max": {
-        "bras_D": (-128, 0, 26),
-        "avbras_D": (-22, 0, 0),
-        "epaule_D": (18, 0, 0),
-        "cou": (-26, 0, 0),
-        "tete": (-18, 0, 0),
-        "colonne": (-12, 0, 8),
-        "poitrine": (-8, 0, 5),
+        "bras_D": (-112, 0, 26),
+        "avbras_D": (-30, 0, 0),
+        "epaule_D": (14, 0, 0),
+        "cou": (-8, 0, 12),
+        "tete": (-5, 0, 8),
+        "colonne": (-7, 0, 8),
+        "poitrine": (-5, 0, 5),
         "bras_G": (-18, 0, -10),
     },
     # --- tirer sur la ficelle : mains devant la POITRINE, pas le menton ---
@@ -219,16 +239,21 @@ POSES = {
         "colonne": (-5, 0, 0),
     },
     # --- monte sur le tabouret, se hisse sur la pointe des pieds ---
+    # Mesure (v45) : cou -18 + tete -12 + colonne -8 = 38 deg cumules, soit
+    # 22 mm de saillie du nez -- sous le seuil de 30, la camera perd la
+    # figure. L'elevation doit venir des JAMBES, qui sont le sujet de cette
+    # pose : le personnage se hisse, il ne renverse pas la nuque. On passe
+    # donc a 25 deg cumules (56 mm de saillie) et on rend 4 deg aux chevilles.
     "sur_pointes": {
         "cuisse_D": (-7, 0, 0),
         "cuisse_G": (-7, 0, 0),
         "tibia_D": (12, 0, 0),
         "tibia_G": (12, 0, 0),
-        "pied_D": (28, 0, 0),
-        "pied_G": (28, 0, 0),
-        "colonne": (-8, 0, 0),
-        "cou": (-18, 0, 0),
-        "tete": (-12, 0, 0),
+        "pied_D": (32, 0, 0),
+        "pied_G": (32, 0, 0),
+        "colonne": (-7, 0, 0),
+        "cou": (-11, 0, 0),
+        "tete": (-7, 0, 0),
     },
     # --- surprise, recul, mains qui remontent devant ---
     "sursaut": {
@@ -382,11 +407,32 @@ def lisser(arm):
             kp.handle_right_type = "AUTO_CLAMPED"
 
 
+def perimer(out):
+    """Efface le .blend existant AVANT de commencer.
+
+    Sans cela, un contrôle qui echoue laisse en place la version precedente
+    et toute la chaine continue dessus en affichant des succes. C'est arrive
+    trois fois aujourd'hui : des valeurs d'os qui ne correspondaient a aucune
+    version du source, des « 21 sommets » invariables, et quatre plans
+    signales a -5 mm identiques. A chaque fois je mesurais un fichier mort.
+
+    Un artefact absent est un echec visible ; un artefact perime est un
+    mensonge.
+    """
+    chemin = os.path.abspath(out)
+    if os.path.isfile(chemin):
+        os.remove(chemin)
+        print("   fichier precedent efface : un echec ne laissera pas de "
+              "version perimee derriere lui")
+
+
 def main():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     out = os.path.join(HERE, "cvr01_anim.blend")
     if "--out" in argv:
         out = argv[argv.index("--out") + 1]
+
+    perimer(out)
 
     sc = bpy.context.scene
     sc.render.fps = FPS
@@ -711,6 +757,16 @@ def main():
                 cx = pt.x + (ps.x - pt.x) * 0.62
                 cy = pt.y + (ps.y - pt.y) * 0.62
                 rx, ry = rc * 0.46, rc * 0.42
+                # L'ellipse couvre tout le CRANE (centre a 62 % du menton vers
+                # le sommet, rayon ~0,46 fois sa hauteur), alors que la figure
+                # occupe la moitie basse. Mesure (v45) sur P008 : les 29
+                # sommets accuses d'Awa_CORPS sont a +145 a +259 mm AU-DESSUS
+                # du menton, peses sur `epaule_D` -- c'est la manche levee qui
+                # passe a cote de la tempe, pas devant les yeux. Un bras tendu
+                # passe forcement pres du crane : ce n'est un defaut que s'il
+                # couvre la FIGURE. On borne donc le test au-dessus du menton
+                # a la hauteur du front, soit 55 % de la tete.
+                y_front = pt.y + (ps.y - pt.y) * 0.55
                 # Seuil calibre sur des cas dont je connais la reponse (v23,
                 # apres exclusion du crane) :
                 #     P002 sain   6 sommets     P008 casse   39
@@ -743,6 +799,7 @@ def main():
                         pp = w2c(sc, cam, p)
                         if ((pp.x - cx) / rx) ** 2 \
                                 + ((pp.y - cy) / ry) ** 2 < 1.0 \
+                                and pp.y < y_front \
                                 and pp.z < pt.z - 0.02:
                             n += 1
                     ev.to_mesh_clear()
@@ -833,6 +890,62 @@ def main():
         sys.exit(1)
     print("visages : degages a l'ecran sur les 15 plans")
 
+    # Un visage degage peut tout de meme etre INVISIBLE : si la tete bascule
+    # trop en arriere, la camera ne voit que le dessous du menton. Mesure
+    # (v42) : a P008 le nez d'Awa etait a y=-0,37 pour un menton a y=-0,41 --
+    # le nez DERRIERE le menton, donc la figure tournee vers le ciel. Le
+    # controle precedent ne pouvait pas le voir : il cherche ce qui RECOUVRE
+    # le visage, pas son orientation.
+    renverses = []
+    for i, plan in enumerate(M.PLANS):
+        f = 1 + i * F_PAR_PLAN + FPS * 2
+        sc.frame_set(f)
+        bpy.context.view_layer.update()
+        dgf = bpy.context.evaluated_depsgraph_get()
+        dgf.update()
+        for nom in plan["persos"]:
+            rig = rigs.get(nom)
+            nez = bpy.data.objects.get("%s_NEZ" % nom)
+            if rig is None or nez is None:
+                continue
+            tete = rig.pose.bones.get("tete")
+            if tete is None:
+                continue
+            menton = rig.matrix_world @ tete.head
+            ev = nez.evaluated_get(dgf)
+            me = ev.to_mesh()
+            if not me.vertices:
+                ev.to_mesh_clear()
+                continue
+            c = sum((nez.matrix_world @ v.co for v in me.vertices),
+                    Vector()) / len(me.vertices)
+            ev.to_mesh_clear()
+            # Mesure (v43) : au repos le nez d'Awa saille de 109 mm devant le
+            # menton. `regarde_haut` tombe a +6 mm (tete presque a la
+            # verticale), `regarde_haut_fort` passe a -58 mm : le nez DERRIERE
+            # le menton, visage vers le ciel. Le seuil est donc 30 mm de
+            # saillie restante -- en dessous, la camera voit le dessous du
+            # menton et plus la figure. Une marge de 20 mm aurait condamne
+            # `regarde_haut` a +6 mm sans pour autant sauver les poses
+            # franchement renversees.
+            if menton.y - c.y < 0.030:
+                ang = " ".join(
+                    "%s=%.1f" % (b, math.degrees(
+                        rig.pose.bones[b].rotation_euler.x))
+                    for b in ("cou", "tete", "colonne", "poitrine")
+                    if b in rig.pose.bones)
+                renverses.append(
+                    "%s %s : nez a %.0f mm du menton (mini 30) -- "
+                    "la tete est trop renversee [%s]"
+                    % (nom, plan["id"], (menton.y - c.y) * 1000, ang))
+
+    if renverses:
+        for r in renverses:
+            print("ERREUR orientation : %s" % r)
+        print("ERREUR : %d visage(s) tournes vers le ciel" % len(renverses))
+        sys.exit(1)
+    print("visages : tournes vers la camera sur les 15 plans")
+
     # Silhouette lisible : le controle precedent ne verifie qu'UNE chose, que
     # rien ne passe devant la figure. Il a laisse passer des bras en croix
     # (Tano en epouvantail) et une tete noyee derriere l'epaule (Awa), parce
@@ -862,10 +975,27 @@ def main():
                 coude = math.degrees(math.acos(max(-1.0, min(1.0,
                     v_bras.normalized().dot(v_av.normalized())))))
                 leve = (pb_b.tail - pb_b.head).dot(axe) > 0.30 * v_bras.length
-                if leve and ecart > 62.0:
+                # L'ecart a l'axe ne dit pas DANS QUELLE DIRECTION le bras
+                # s'ecarte. Un epouvantail ouvre les bras sur le COTE ; une
+                # enfant qui tend le bras vers une branche l'ouvre vers
+                # l'AVANT, et l'angle est le meme. Mesure (v46) sur P008 :
+                # 63 deg d'ecart total pour un bras dont la composante
+                # laterale ne vaut que 29 deg -- le reste est de l'elevation
+                # vers le cerf-volant, qui est le sujet du plan. On ne mesure
+                # donc que la part laterale, celle qui fait la croix.
+                lat = v_bras.normalized().copy()
+                lat.y = 0.0
+                if lat.length > 1e-6:
+                    ecart_lat = math.degrees(math.acos(max(-1.0, min(1.0,
+                        lat.normalized().dot(axe)))))
+                    ecart_lat = min(ecart_lat, 180.0 - ecart_lat)
+                else:
+                    ecart_lat = 0.0
+                if leve and ecart_lat > 62.0:
                     raides.append(
-                        "%s %s : bras_%s en croix (%.0f deg de l'axe du "
-                        "corps, maxi 62)" % (nom, plan["id"], cote, ecart))
+                        "%s %s : bras_%s en croix (%.0f deg lateraux de "
+                        "l'axe du corps, maxi 62)"
+                        % (nom, plan["id"], cote, ecart_lat))
                 if leve and coude < 12.0:
                     raides.append(
                         "%s %s : bras_%s tendu raide (coude flechi de "

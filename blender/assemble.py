@@ -124,6 +124,82 @@ def placer(nouveaux):
     else:
         log("!! collection OBJ_STOOL introuvable, tabouret non deplace")
 
+    monter_sur_tabouret()
+
+
+def monter_sur_tabouret():
+    """Souleve le sujet des plans ou le document le met sur le tabouret.
+
+    Le decoupage porte un champ STRUCTURE, `sujet_bonus_m`, valant 0,42 sur
+    P004 (Tano) et P008 (Awa) ; `M.hauteur_sujet_m()` l'ajoute deja a la
+    taille pour calculer le cadrage. Mais aucun script Blender ne le lisait :
+    les cameras cadraient un sujet surleve de 42 cm pendant que le
+    personnage restait au sol, a cote d'un tabouret vide.
+
+    Le document est explicite (P004) :
+        debut       "Tano monte sur le tabouret et tend la ficelle"
+        evenement   "... le tabouret oscille sous ses pieds"
+        note_objets "Tano a les deux pieds sur l'assise"
+    et c'est toute la fonction du plan : Tano sur le tabouret atteint 2,16 m
+    pour une branche a 2,25 -- il echoue de 9 cm. Awa, plus grande, atteint
+    2,34 m et reussit a P008. Sans la surelevation, les deux plans racontent
+    la meme chose et l'echec n'existe plus.
+
+    On anime la hauteur du rig plutot que de la fixer : le personnage est au
+    sol partout ailleurs, et un acteur qui se teleporte sur un tabouret entre
+    deux plans casserait le raccord RPOS autant que s'il changeait de marque.
+    """
+    sc = bpy.context.scene
+    f_par_plan = sc.frame_end // len(M.PLANS)
+    montes = []
+
+    for i, plan in enumerate(M.PLANS):
+        bonus = plan.get("sujet_bonus_m", 0.0)
+        if not bonus:
+            continue
+        perso = plan.get("sujet_ref")
+        rig = bpy.data.objects.get("%s_RIG" % perso)
+        if rig is None:
+            continue
+
+        f0 = 1 + i * f_par_plan
+        f1 = f0 + f_par_plan - 1
+        base = MARQUES[perso].z
+
+        # Au sol juste avant le plan, sur l'assise pendant tout le plan, au
+        # sol juste apres. Deux images de battement suffisent : le plan
+        # precedent ne montre pas ce personnage en train de monter.
+        for f, z in ((f0 - 2, base), (f0, base + bonus),
+                     (f1, base + bonus), (f1 + 2, base)):
+            if f < 1 or f > sc.frame_end:
+                continue
+            rig.location.z = z
+            rig.keyframe_insert("location", index=2, frame=f)
+
+        # Le tabouret doit etre SOUS lui, pas a cote : on l'amene sur sa
+        # marque en X/Y pendant ce plan. Comme les deux plans concernes
+        # utilisent le meme tabouret a des endroits differents, on l'anime.
+        col = bpy.data.collections.get("OBJ_STOOL")
+        if col is not None:
+            cible = MARQUES[perso]
+            for o in col.objects:
+                # position de repos (deja decalee de TABOURET) -> marque
+                repos = o.location.copy()
+                o.keyframe_insert("location", frame=max(1, f0 - 6))
+                o.location.x = repos.x + (cible.x - TABOURET.x)
+                o.location.y = repos.y + (cible.y - TABOURET.y)
+                o.keyframe_insert("location", frame=f0)
+                o.keyframe_insert("location", frame=f1)
+                o.location = repos
+                o.keyframe_insert("location",
+                                  frame=min(sc.frame_end, f1 + 6))
+
+        montes.append("%s a %s (+%.2f m)" % (perso, plan["id"], bonus))
+
+    if montes:
+        log("sur le tabouret : %s" % " ; ".join(montes))
+    return montes
+
 
 def recaler_cameras():
     """Recale la cible et la position de chaque camera sur son sujet.
@@ -272,6 +348,60 @@ def verifier(sc):
                 "le cerf-volant commence a %.2f m, au-dessus de la branche "
                 "a 2,25 m : il ne touche pas l'arbre" % z_bas)
 
+    # Les plans qui mettent le sujet sur le tabouret doivent le montrer
+    # SURELEVE, et le tabouret doit etre sous ses pieds. Sans ce controle,
+    # Tano restait au sol a cote d'un tabouret vide pendant que la camera
+    # cadrait un sujet de 42 cm plus haut.
+    for i, plan in enumerate(M.PLANS):
+        bonus = plan.get("sujet_bonus_m", 0.0)
+        if not bonus:
+            continue
+        perso = plan.get("sujet_ref")
+        rig = bpy.data.objects.get("%s_RIG" % perso)
+        if rig is None:
+            continue
+        f_evt = 1 + i * (sc.frame_end // len(M.PLANS)) + 48
+        sc.frame_set(f_evt)
+        bpy.context.view_layer.update()
+
+        z = rig.matrix_world.translation.z
+        if abs(z - bonus) > 0.03:
+            erreurs.append(
+                "%s : %s est a %.2f m alors que le document le met sur le "
+                "tabouret (+%.2f m)" % (plan["id"], perso, z, bonus))
+
+        pieds = min((rig.matrix_world @ rig.pose.bones[b].head).z
+                    for b in ("pied_G", "pied_D") if b in rig.pose.bones)
+        col = bpy.data.collections.get("OBJ_STOOL")
+        if col is not None and col.objects:
+            dg2 = bpy.context.evaluated_depsgraph_get()
+            hauts = []
+            cx = []
+            cy = []
+            for o in col.objects:
+                ev = o.evaluated_get(dg2)
+                me = ev.to_mesh()
+                for v in me.vertices:
+                    p = o.matrix_world @ v.co
+                    hauts.append(p.z)
+                    cx.append(p.x)
+                    cy.append(p.y)
+                ev.to_mesh_clear()
+            assise = max(hauts)
+            # Les pieds doivent reposer sur l'assise, pas flotter ni la
+            # traverser, et le tabouret doit etre sous le personnage.
+            if abs(pieds - assise) > 0.12:
+                erreurs.append(
+                    "%s : pieds de %s a %.2f m, assise a %.2f m"
+                    % (plan["id"], perso, pieds, assise))
+            centre = rig.matrix_world.translation
+            dist = math.hypot(sum(cx) / len(cx) - centre.x,
+                              sum(cy) / len(cy) - centre.y)
+            if dist > 0.35:
+                erreurs.append(
+                    "%s : tabouret a %.2f m de %s, pas sous ses pieds"
+                    % (plan["id"], dist, perso))
+
     if erreurs:
         for e in erreurs[:12]:
             print("ERREUR assemblage : %s" % e)
@@ -281,6 +411,7 @@ def verifier(sc):
     log("personnages animes sur 1800 images, hors du tronc, a %.2f m "
         "l'un de l'autre" % ecart)
     log("15 cameras cadrent leur sujet a l'echelle declaree")
+    log("P004 et P008 : le sujet est sur l'assise, tabouret sous ses pieds")
 
 
 def main():
@@ -299,6 +430,15 @@ def main():
     f_scene = os.path.abspath(f_scene)
     f_persos = os.path.abspath(f_persos)
     f_out = os.path.abspath(f_out)
+
+    # Le fichier de sortie est efface AVANT tout travail : un controle qui
+    # echoue plus bas laisserait sinon la version precedente en place, et la
+    # planche comme le rendu tourneraient dessus en affichant des succes.
+    # (Trois fois aujourd'hui : des os a -168 deg absents du source, des
+    # sommets invariables, quatre plans a -5 mm identiques.) Un artefact
+    # absent est un echec visible ; un artefact perime est un mensonge.
+    if os.path.isfile(f_out):
+        os.remove(f_out)
     for f in (f_scene, f_persos):
         if not os.path.isfile(f):
             print("ERREUR : fichier introuvable : %s" % f)
