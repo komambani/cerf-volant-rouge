@@ -28,7 +28,8 @@ F_PAR_PLAN = 120
 LARGEUR = M.PROJET["largeur"]
 HAUTEUR = M.PROJET["hauteur"]
 
-FRAMES = os.path.join(RACINE, "blender", "renders", "frames")
+# Surchargeables pour le rendu cloud (rendu_cloud.py) sans toucher au rendu local.
+FRAMES = os.environ.get("CVR01_FRAMES") or os.path.join(RACINE, "blender", "renders", "frames")
 SON = os.path.join(RACINE, "audio", "cvr01_mix_r128.wav")
 EXPORTS = os.path.join(RACINE, "exports")
 
@@ -93,7 +94,8 @@ def main():
 
     # --- encodage ----------------------------------------------------------
     os.makedirs(EXPORTS, exist_ok=True)
-    sortie = os.path.join(EXPORTS, "CVR01_le_cerf_volant_rouge.mp4")
+    sortie = (os.environ.get("CVR01_SORTIE")
+              or os.path.join(EXPORTS, "CVR01_le_cerf_volant_rouge.mp4"))
 
     # yuv420p et le niveau 4.0 : lisibles par tout lecteur, y compris les
     # telephones et les navigateurs. CRF 18 est visuellement sans perte sur
