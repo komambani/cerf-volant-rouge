@@ -1,0 +1,167 @@
+# Chaine de fabrication complete de CVR01 sur runner GitHub (Linux, CPU).
+#
+#   modele -> verifier -> decor -> personnages -> verif -> poses -> assemblage
+#          -> planche de controle (1 image par plan)
+#
+# Declenchement :
+#   - automatique a chaque push qui touche doc/ ou un script de la chaine :
+#     construit et controle, publie la planche, ne touche PAS au film versionne ;
+#   - manuel (par Hermes) :  gh workflow run chaine.yml -f publier=true
+#     -> en plus, commite le nouveau blender/cvr01_film.blend sur main, pret
+#        pour rendu.yml.
+#
+# Chaque etape echoue bruyamment : code de sortie, Traceback dans le journal,
+# ou .blend de sortie absent (les scripts le periment avant de travailler).
+
+name: chaine
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "doc/cvr01_model.py"
+      - "doc/verifier.py"
+      - "blender/build_scene.py"
+      - "blender/characters.py"
+      - "blender/verif_persos.py"
+      - "blender/poses.py"
+      - "blender/assemble.py"
+      - "blender/planche_film.py"
+  workflow_dispatch:
+    inputs:
+      publier:
+        description: "Commiter le cvr01_film.blend reconstruit sur main"
+        type: boolean
+        default: false
+
+concurrency:
+  group: chaine
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  BLENDER_VERSION: "4.5.9"
+  BLENDER_SERIE: "4.5"
+  LIBGL_ALWAYS_SOFTWARE: "1"
+  GALLIUM_DRIVER: llvmpipe
+
+jobs:
+  construire:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Blender
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/blender
+          key: blender-${{ env.BLENDER_VERSION }}-linux-x64
+
+      - name: Telechargement Blender
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/blender
+          curl -fsSL "https://download.blender.org/release/Blender${BLENDER_SERIE}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" \
+            | tar -xJ -C ~/blender --strip-components=1
+
+      - name: Dependances (Xvfb + Mesa logiciel)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            xvfb libgl1 libegl1 libgl1-mesa-dri libglx-mesa0 \
+            libxi6 libxxf86vm1 libxfixes3 libxrender1 libxkbcommon0 libsm6 libice6 > /dev/null
+          # Un seul serveur X pour toute la chaine
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          mkdir -p journaux
+
+      - name: 1. Verification du modele
+        run: python3 doc/verifier.py 2>&1 | tee journaux/1_verifier.txt
+
+      # etape <num_nom> <fichier .blend attendu ou -> <arguments blender...>
+      - name: Outil d'etape
+        run: |
+          cat > etape.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -o pipefail
+          nom="$1"; attendu="$2"; shift 2
+          [ "$attendu" != "-" ] && rm -f "$attendu"
+          t0=$(date +%s)
+          ~/blender/blender "$@" > "journaux/$nom.txt" 2>&1
+          code=$?
+          tail -n 25 "journaux/$nom.txt"
+          echo "--- $nom : code $code en $(( $(date +%s) - t0 )) s"
+          if [ $code -ne 0 ]; then echo "::error::$nom code $code"; exit 1; fi
+          if grep -q "^Traceback" "journaux/$nom.txt"; then echo "::error::$nom Traceback"; exit 1; fi
+          if [ "$attendu" != "-" ] && [ ! -s "$attendu" ]; then echo "::error::$nom n'a pas ecrit $attendu"; exit 1; fi
+          exit 0
+          EOF
+          chmod +x etape.sh
+
+      - name: 2. Decor + 15 cameras
+        run: ./etape.sh 2_scene blender/cvr01_scene.blend -b --factory-startup -P blender/build_scene.py -- --out blender/cvr01_scene.blend
+
+      - name: 3. Personnages
+        run: ./etape.sh 3_persos blender/cvr01_persos.blend -b --factory-startup -P blender/characters.py -- --out blender/cvr01_persos.blend
+
+      - name: 4. Verification des personnages
+        run: ./etape.sh 4_verif_persos - -b blender/cvr01_persos.blend -P blender/verif_persos.py
+
+      - name: 5. Animation des plans
+        run: ./etape.sh 5_poses blender/cvr01_anim.blend -b blender/cvr01_persos.blend -P blender/poses.py -- --scene blender/cvr01_scene.blend --out blender/cvr01_anim.blend
+
+      - name: 6. Assemblage du film
+        run: ./etape.sh 6_assemble blender/cvr01_film.blend -b --factory-startup -P blender/assemble.py -- --scene blender/cvr01_scene.blend --persos blender/cvr01_anim.blend --out blender/cvr01_film.blend
+
+      - name: 7. Planche de controle
+        run: |
+          rm -rf planche && ./etape.sh 7_planche - -b blender/cvr01_film.blend -P blender/planche_film.py -- --out "$GITHUB_WORKSPACE/planche"
+          n=$(ls planche/*.png 2>/dev/null | wc -l)
+          echo "planche : $n image(s)"
+          [ "$n" -ge 15 ] || { echo "::error::planche incomplete ($n/15)"; exit 1; }
+
+      - name: Resume
+        if: always()
+        run: |
+          {
+            echo "### Chaine CVR01"
+            for f in journaux/*.txt; do
+              echo "- \`$(basename "$f" .txt)\` : $(grep -E "SUCCES|ECHEC|OK|ERREUR" "$f" | tail -1)"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: journaux
+          path: journaux/
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: planche
+          path: planche/*.png
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: film-blend
+          path: blender/cvr01_film.blend
+          retention-days: 14
+
+      - name: Publication du film sur main
+        if: github.event_name == 'workflow_dispatch' && inputs.publier
+        run: |
+          git config user.name "cvr01-chaine"
+          git config user.email "actions@users.noreply.github.com"
+          git add blender/cvr01_film.blend
+          if git diff --cached --quiet; then
+            echo "film identique, rien a publier"
+          else
+            git commit -m "build(film): cvr01_film.blend reconstruit par la chaine (${GITHUB_SHA::7})"
+            git push origin HEAD:main
+          fi
