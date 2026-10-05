@@ -1,0 +1,142 @@
+# Rendu de CVR01 sur les runners GitHub (Linux, CPU, sans GPU).
+#
+# Pourquoi ici : la machine locale (UHD 620) plante le pilote GPU apres ~1 h
+# d'EEVEE. Un runner GitHub est jetable : EEVEE Next y tourne via Xvfb + Mesa
+# llvmpipe (OpenGL logiciel). Chaque runner est lent, mais on en lance
+# jusqu'a 20 en parallele, gratuits sur un depot public.
+#
+# Declenchement (par Hermes, sans intervention) :
+#   python blender/rendu_cloud.py --debut 1 --fin 1800 --tranches 20
+#
+# Sortie : un artefact `images-A-B` par tranche (PNG, retention 3 jours).
+# Le rapatriement, le controle et le montage se font en local par
+# blender/rendu_cloud.py (la bande son mixee n'est pas versionnee).
+
+name: rendu
+
+on:
+  workflow_dispatch:
+    inputs:
+      debut:
+        description: "Premiere image"
+        default: "1"
+      fin:
+        description: "Derniere image"
+        default: "1800"
+      tranches:
+        description: "Nombre de runners paralleles (1-20)"
+        default: "20"
+      samples:
+        description: "Samples EEVEE (0 = valeur du fichier)"
+        default: "0"
+      pourcentage:
+        description: "Echelle de resolution en % (100 = 1920x1080)"
+        default: "100"
+
+concurrency:
+  group: rendu
+  cancel-in-progress: false
+
+env:
+  BLENDER_VERSION: "4.5.9"
+  BLENDER_SERIE: "4.5"
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrice: ${{ steps.p.outputs.matrice }}
+    steps:
+      - id: p
+        name: Decoupage en tranches
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json
+          a, b = int("${{ inputs.debut }}"), int("${{ inputs.fin }}")
+          n = max(1, min(20, int("${{ inputs.tranches }}")))
+          assert 1 <= a <= b, "plage invalide %d-%d" % (a, b)
+          total = b - a + 1
+          n = min(n, total)
+          taille = -(-total // n)
+          t = [{"a": x, "b": min(x + taille - 1, b)} for x in range(a, b + 1, taille)]
+          print("matrice=" + json.dumps({"include": t}))
+          EOF
+          cat "$GITHUB_OUTPUT"
+
+  rendu:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.plan.outputs.matrice) }}
+    name: rendu ${{ matrix.a }}-${{ matrix.b }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            blender/cvr01_film.blend
+          sparse-checkout-cone-mode: false
+
+      - name: Cache Blender
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/blender
+          key: blender-${{ env.BLENDER_VERSION }}-linux-x64
+
+      - name: Telechargement Blender
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/blender
+          curl -fsSL "https://download.blender.org/release/Blender${BLENDER_SERIE}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" \
+            | tar -xJ -C ~/blender --strip-components=1
+
+      - name: Dependances (Xvfb + Mesa logiciel)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            xvfb libgl1 libegl1 libgl1-mesa-dri libglx-mesa0 \
+            libxi6 libxxf86vm1 libxfixes3 libxrender1 libxkbcommon0 libsm6 libice6 > /dev/null
+
+      - name: Rendu ${{ matrix.a }}-${{ matrix.b }}
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          GALLIUM_DRIVER: llvmpipe
+        run: |
+          set -o pipefail
+          mkdir -p out
+          PY="import bpy; s=bpy.context.scene; s.render.resolution_percentage=int('${{ inputs.pourcentage }}')"
+          if [ "${{ inputs.samples }}" != "0" ]; then
+            PY="$PY; s.eevee.taa_render_samples=int('${{ inputs.samples }}')"
+          fi
+          PY="$PY; print('CONFIG', s.render.engine, s.render.resolution_percentage, s.eevee.taa_render_samples)"
+          xvfb-run -a -s "-screen 0 1920x1080x24" \
+            ~/blender/blender -b blender/cvr01_film.blend \
+              --python-expr "$PY" \
+              -o "$GITHUB_WORKSPACE/out/img_####" -F PNG -x 1 \
+              -s ${{ matrix.a }} -e ${{ matrix.b }} -a 2>&1 \
+            | grep -E "CONFIG|Saved|Error|ERREUR|Traceback|EXCEPTION" || true
+
+      - name: Controle des images
+        run: |
+          python3 - <<'EOF'
+          import os, sys
+          a, b = ${{ matrix.a }}, ${{ matrix.b }}
+          manq = [f for f in range(a, b + 1)
+                  if not os.path.isfile("out/img_%04d.png" % f)
+                  or os.path.getsize("out/img_%04d.png" % f) < 20000]
+          if manq:
+              print("ERREUR %d image(s) manquante(s) ou vide(s) : %s" % (len(manq), manq[:10]))
+              sys.exit(1)
+          print("OK %d images %d-%d" % (b - a + 1, a, b))
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ matrix.a }}-${{ matrix.b }}
+          path: out/*.png
+          retention-days: 3
+          compression-level: 0
+
